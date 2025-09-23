@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# WHM-to-WHM Transfer (No Root)
-# Single-file installer/script using jq
+# WHM Source Scanner - List Packages and Accounts (No Root)
 # Usage: sudo bash -c "$(curl -fsSL <URL> || wget -qO- <URL>)"
 
 set -euo pipefail
@@ -15,7 +14,7 @@ RESET="\e[0m"
 
 # --- Banner ---
 echo -e "${CYAN}==============================================${RESET}"
-echo -e "${CYAN}   WHM-to-WHM Transfer (No Root) Script       ${RESET}"
+echo -e "${CYAN}   WHM Source Scanner - Packages & Accounts   ${RESET}"
 echo -e "${CYAN}==============================================${RESET}"
 echo
 
@@ -37,14 +36,6 @@ read -p "Enter source WHM hostname: " SRC_HOST
 read -p "Enter source WHM username: " SRC_USER
 read -sp "Enter source WHM password: " SRC_PASS
 echo
-
-# --- Optional: Destination credentials ---
-read -p "Enter destination hostname (FTP target or WHM host, optional): " DST_HOST
-read -p "Enter destination username (optional): " DST_USER
-read -sp "Enter destination password (optional): " DST_PASS
-echo
-read -p "Enter destination FTP path (default /, optional): " DST_DIR
-DST_DIR=${DST_DIR:-/}
 
 # --- WHM API function ---
 whm_api() {
