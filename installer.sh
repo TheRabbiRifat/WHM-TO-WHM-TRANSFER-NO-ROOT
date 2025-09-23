@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# WHM Source Scanner - List Packages and Accounts (No Root)
-# Usage: sudo bash -c "$(curl -fsSL <URL> || wget -qO- <URL>)"
+# WHM Source Scanner - Packages & Accounts (No Root)
+# Fully robust script with password special character support
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -32,10 +32,26 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # --- Input source WHM credentials ---
-read -p "Enter source WHM hostname: " SRC_HOST
+read -p "Enter source WHM hostname (without https://): " SRC_HOST
 read -p "Enter source WHM username: " SRC_USER
 read -sp "Enter source WHM password: " SRC_PASS
 echo
+
+# --- URL-encode password to safely handle special characters ---
+urlencode() {
+    local raw="$1"
+    local length="${#raw}"
+    local i c
+    for ((i=0; i<length; i++)); do
+        c="${raw:i:1}"
+        case $c in
+            [a-zA-Z0-9.~_-]) printf "%s" "$c" ;;
+            *) printf '%%%02X' "'$c"
+        esac
+    done
+}
+
+ENC_PASS=$(urlencode "$SRC_PASS")
 
 # --- WHM API function ---
 whm_api() {
@@ -50,11 +66,12 @@ whm_api() {
 
 # --- Step 1: List all packages ---
 echo -e "${CYAN}[*] Fetching all packages from $SRC_HOST...${RESET}"
-PACKAGES_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_PASS" "listpkgs" "")
+PACKAGES_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$ENC_PASS" "listpkgs" "")
 PACKAGES=$(echo "$PACKAGES_JSON" | jq -r '.data.pkg[]?.name // empty')
 
 if [[ -z "$PACKAGES" ]]; then
     echo -e "${YELLOW} - No packages found or insufficient permissions.${RESET}"
+    echo -e "${YELLOW} [!] Make sure this WHM account has permission to list packages.${RESET}"
 else
     echo -e "${GREEN}[*] Found packages:${RESET}"
     while IFS= read -r pkg; do
@@ -64,11 +81,12 @@ fi
 
 # --- Step 2: List all accounts/users ---
 echo -e "${CYAN}[*] Fetching all accounts/users under this reseller...${RESET}"
-ACCOUNTS_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_PASS" "listaccts" "")
+ACCOUNTS_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$ENC_PASS" "listaccts" "")
 ACCOUNTS=$(echo "$ACCOUNTS_JSON" | jq -r '.data.accts[]?.user // empty')
 
 if [[ -z "$ACCOUNTS" ]]; then
     echo -e "${YELLOW} - No accounts found or insufficient permissions.${RESET}"
+    echo -e "${YELLOW} [!] Make sure this WHM account owns some cPanel accounts.${RESET}"
 else
     echo -e "${GREEN}[*] Found accounts/users:${RESET}"
     while IFS= read -r user; do
