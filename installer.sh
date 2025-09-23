@@ -27,7 +27,7 @@ read -p "Enter destination FTP path (default /, optional): " DST_DIR
 DST_DIR=${DST_DIR:-/}
 
 # --- WHM API function ---
-function whm_api() {
+whm_api() {
     local host="$1"
     local user="$2"
     local pass="$3"
@@ -41,25 +41,33 @@ function whm_api() {
 echo "[*] Fetching all packages from $SRC_HOST..."
 PACKAGES_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_PASS" "listpkgs" "")
 
-# Parse package names manually
-PACKAGES=$(echo "$PACKAGES_JSON" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//')
+# Extract "name":"PACKAGE_NAME" properly
+PACKAGES=$(echo "$PACKAGES_JSON" | tr -d '\n' | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//')
 
 echo "[*] Found packages:"
-while IFS= read -r pkg; do
-    echo " - $pkg"
-done <<< "$PACKAGES"
+if [[ -z "$PACKAGES" ]]; then
+    echo " - No packages found or insufficient permissions."
+else
+    while IFS= read -r pkg; do
+        echo " - $pkg"
+    done <<< "$PACKAGES"
+fi
 
 # --- Step 2: List all accounts/users ---
 echo "[*] Fetching all accounts/users under this reseller..."
 ACCOUNTS_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_PASS" "listaccts" "")
 
-# Parse usernames manually
-ACCOUNTS=$(echo "$ACCOUNTS_JSON" | grep -o '"user":"[^"]*"' | sed 's/"user":"//;s/"//')
+# Extract usernames properly
+ACCOUNTS=$(echo "$ACCOUNTS_JSON" | tr -d '\n' | grep -o '"user":"[^"]*"' | sed 's/"user":"//;s/"//')
 
 echo "[*] Found accounts/users:"
-while IFS= read -r user; do
-    echo " - $user"
-done <<< "$ACCOUNTS"
+if [[ -z "$ACCOUNTS" ]]; then
+    echo " - No accounts found or insufficient permissions."
+else
+    while IFS= read -r user; do
+        echo " - $user"
+    done <<< "$ACCOUNTS"
+fi
 
 echo
 echo "[*] Done. All packages and users listed successfully."
