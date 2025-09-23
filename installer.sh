@@ -1,16 +1,36 @@
 #!/usr/bin/env bash
 # WHM-to-WHM Transfer (No Root)
-# Single-file installer/script (no jq required)
+# Single-file installer/script using jq
 # Usage: sudo bash -c "$(curl -fsSL <URL> || wget -qO- <URL>)"
 
 set -euo pipefail
 IFS=$'\n\t'
 
+# --- Colors ---
+GREEN="\e[32m"
+CYAN="\e[36m"
+YELLOW="\e[33m"
+RED="\e[31m"
+RESET="\e[0m"
+
 # --- Banner ---
-echo "=============================================="
-echo "   WHM-to-WHM Transfer (No Root) Script       "
-echo "=============================================="
+echo -e "${CYAN}==============================================${RESET}"
+echo -e "${CYAN}   WHM-to-WHM Transfer (No Root) Script       ${RESET}"
+echo -e "${CYAN}==============================================${RESET}"
 echo
+
+# --- Install jq if missing ---
+if ! command -v jq &>/dev/null; then
+    echo -e "${YELLOW}[*] jq not found. Installing jq...${RESET}"
+    if command -v yum &>/dev/null; then
+        sudo yum install -y jq
+    elif command -v apt &>/dev/null; then
+        sudo apt update && sudo apt install -y jq
+    else
+        echo -e "${RED}ERROR: Could not install jq. Please install it manually.${RESET}"
+        exit 1
+    fi
+fi
 
 # --- Input source WHM credentials ---
 read -p "Enter source WHM hostname: " SRC_HOST
@@ -38,36 +58,31 @@ whm_api() {
 }
 
 # --- Step 1: List all packages ---
-echo "[*] Fetching all packages from $SRC_HOST..."
+echo -e "${CYAN}[*] Fetching all packages from $SRC_HOST...${RESET}"
 PACKAGES_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_PASS" "listpkgs" "")
+PACKAGES=$(echo "$PACKAGES_JSON" | jq -r '.data.pkg[]?.name // empty')
 
-# Extract "name":"PACKAGE_NAME" properly
-PACKAGES=$(echo "$PACKAGES_JSON" | tr -d '\n' | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"//')
-
-echo "[*] Found packages:"
 if [[ -z "$PACKAGES" ]]; then
-    echo " - No packages found or insufficient permissions."
+    echo -e "${YELLOW} - No packages found or insufficient permissions.${RESET}"
 else
+    echo -e "${GREEN}[*] Found packages:${RESET}"
     while IFS= read -r pkg; do
-        echo " - $pkg"
+        echo -e " - $pkg"
     done <<< "$PACKAGES"
 fi
 
 # --- Step 2: List all accounts/users ---
-echo "[*] Fetching all accounts/users under this reseller..."
+echo -e "${CYAN}[*] Fetching all accounts/users under this reseller...${RESET}"
 ACCOUNTS_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_PASS" "listaccts" "")
+ACCOUNTS=$(echo "$ACCOUNTS_JSON" | jq -r '.data.accts[]?.user // empty')
 
-# Extract usernames properly
-ACCOUNTS=$(echo "$ACCOUNTS_JSON" | tr -d '\n' | grep -o '"user":"[^"]*"' | sed 's/"user":"//;s/"//')
-
-echo "[*] Found accounts/users:"
 if [[ -z "$ACCOUNTS" ]]; then
-    echo " - No accounts found or insufficient permissions."
+    echo -e "${YELLOW} - No accounts found or insufficient permissions.${RESET}"
 else
+    echo -e "${GREEN}[*] Found accounts/users:${RESET}"
     while IFS= read -r user; do
-        echo " - $user"
+        echo -e " - $user"
     done <<< "$ACCOUNTS"
 fi
 
-echo
-echo "[*] Done. All packages and users listed successfully."
+echo -e "${CYAN}\n[*] Done. All packages and users listed successfully.${RESET}"
