@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WHM Source Scanner - Packages & Accounts (No Root)
-# Fully robust script with password special character support
+# Using WHM API Token authentication (recommended)
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -15,6 +15,7 @@ RESET="\e[0m"
 # --- Banner ---
 echo -e "${CYAN}==============================================${RESET}"
 echo -e "${CYAN}   WHM Source Scanner - Packages & Accounts   ${RESET}"
+echo -e "${CYAN}         (Using API Token Auth)               ${RESET}"
 echo -e "${CYAN}==============================================${RESET}"
 echo
 
@@ -31,47 +32,31 @@ if ! command -v jq &>/dev/null; then
     fi
 fi
 
-# --- Input source WHM credentials ---
-read -p "Enter source WHM hostname (without https://): " SRC_HOST
-read -p "Enter source WHM username: " SRC_USER
-read -sp "Enter source WHM password: " SRC_PASS
+# --- Input WHM credentials ---
+read -p "Enter WHM hostname (without https://): " SRC_HOST
+read -p "Enter WHM username (root or reseller): " SRC_USER
+read -sp "Enter WHM API token: " SRC_TOKEN
 echo
-
-# --- URL-encode password to safely handle special characters ---
-urlencode() {
-    local raw="$1"
-    local length="${#raw}"
-    local i c
-    for ((i=0; i<length; i++)); do
-        c="${raw:i:1}"
-        case $c in
-            [a-zA-Z0-9.~_-]) printf "%s" "$c" ;;
-            *) printf '%%%02X' "'$c"
-        esac
-    done
-}
-
-ENC_PASS=$(urlencode "$SRC_PASS")
 
 # --- WHM API function ---
 whm_api() {
     local host="$1"
     local user="$2"
-    local pass="$3"
+    local token="$3"
     local endpoint="$4"
     local params="$5"
 
-    curl -s -k -u "${user}:${pass}" "https://${host}:2087/json-api/${endpoint}?${params}"
+    curl -s -k -H "Authorization: whm ${user}:${token}" \
+         "https://${host}:2087/json-api/${endpoint}?${params}&api.version=1"
 }
 
 # --- Step 1: List all packages ---
 echo -e "${CYAN}[*] Fetching all packages from $SRC_HOST...${RESET}"
-PACKAGES_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$ENC_PASS" "listpkgs" "")
+PACKAGES_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listpkgs" "")
 PACKAGES=$(echo "$PACKAGES_JSON" | jq -r '.data.pkg[]?.name // empty')
 
 if [[ -z "$PACKAGES" ]]; then
     echo -e "${YELLOW} - No packages found or insufficient permissions.${RESET}"
-    echo -e "${YELLOW} [!] Make sure this WHM account has permission to list packages.${RESET}"
 else
     echo -e "${GREEN}[*] Found packages:${RESET}"
     while IFS= read -r pkg; do
@@ -81,12 +66,11 @@ fi
 
 # --- Step 2: List all accounts/users ---
 echo -e "${CYAN}[*] Fetching all accounts/users under this reseller...${RESET}"
-ACCOUNTS_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$ENC_PASS" "listaccts" "")
+ACCOUNTS_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listaccts" "")
 ACCOUNTS=$(echo "$ACCOUNTS_JSON" | jq -r '.data.accts[]?.user // empty')
 
 if [[ -z "$ACCOUNTS" ]]; then
     echo -e "${YELLOW} - No accounts found or insufficient permissions.${RESET}"
-    echo -e "${YELLOW} [!] Make sure this WHM account owns some cPanel accounts.${RESET}"
 else
     echo -e "${GREEN}[*] Found accounts/users:${RESET}"
     while IFS= read -r user; do
