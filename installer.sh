@@ -43,29 +43,43 @@ read -sp "Destination WHM API token: " DST_TOKEN
 echo
 echo
 
-# Helper for WHM API (token auth)
-whm_api_token() {
-  local host="$1"; local user="$2"; local token="$3"; local endpoint="$4"; local params="$5"
-  if [[ -z "$params" ]]; then params="api.version=1"; else params="${params}&api.version=1"; fi
-  curl -s -k -H "Authorization: whm ${user}:${token}" "https://${host}:2087/json-api/${endpoint}?${params}"
-}
-
-# Verbose helper
+# Helpers
 step() { echo -e "${CYAN}[STEP]${RESET} $*"; }
 ok()   { echo -e "${GREEN}[OK]${RESET} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 err()  { echo -e "${RED}[ERR]${RESET} $*"; }
 
-# --- 1) Try to get packages via listpkgs ---
-step "Querying source WHM for packages (listpkgs)..."
+# Wrapper for WHM API call with error handling
+whm_api_token() {
+  local host="$1" user="$2" token="$3" endpoint="$4" params="$5"
+  [[ -z "$params" ]] && params="api.version=1" || params="${params}&api.version=1"
+
+  local resp
+  if ! resp=$(curl -s -k -H "Authorization: whm ${user}:${token}" \
+    "https://${host}:2087/json-api/${endpoint}?${params}" 2>/dev/null); then
+    err "Unable to connect to WHM API at ${host}"
+    exit 1
+  fi
+
+  # Check metadata for errors
+  local result reason
+  result=$(echo "$resp" | jq -r '.metadata.result // empty')
+  reason=$(echo "$resp" | jq -r '.metadata.reason // empty')
+  if [[ "$result" == "0" || "$result" == "null" ]]; then
+    err "API call '${endpoint}' failed: ${reason:-Unknown error}"
+    exit 1
+  fi
+
+  echo "$resp"
+}
+
+# --- 1) Query source WHM packages ---
+step "Querying source WHM for packages..."
 PKG_JSON=$(whm_api_token "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listpkgs" "")
 PKG_NAMES=$(echo "$PKG_JSON" | jq -r '.data.pkg[]?.name // empty' | sed '/^$/d' || true)
 
-if [[ -n "$PKG_NAMES" ]]; then
-  ok "Found $(echo "$PKG_NAMES" | wc -l) packages via listpkgs."
-else
-  warn "listpkgs returned no packages. Falling back to scanning accounts (listaccts)..."
-  step "Querying accounts for package names..."
+if [[ -z "$PKG_NAMES" ]]; then
+  warn "No packages returned by listpkgs. Trying listaccts..."
   ACC_JSON=$(whm_api_token "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listaccts" "")
   PKG_NAMES=$(echo "$ACC_JSON" | jq -r '
     if .data.acct != null then
@@ -73,41 +87,38 @@ else
     elif .data.accts != null then
       .data.accts[] | (.plan // .pkg // .plan_name // empty)
     else empty end
-  ' | sed '/^$/d' | sort -u || true)
-  [[ -n "$PKG_NAMES" ]] && ok "Found $(echo "$PKG_NAMES" | wc -l) package(s) from accounts."
+  ' | sort -u | sed '/^$/d')
 fi
 
 echo
 echo -e "${CYAN}=== Packages discovered on source (${SRC_HOST}) ===${RESET}"
 [[ -z "$PKG_NAMES" ]] && echo -e "${YELLOW} (none found)${RESET}" || echo "$PKG_NAMES" | sed 's/^/ - /'
+[[ -z "$PKG_NAMES" ]] && { warn "Nothing to do."; exit 0; }
 echo
 
-[[ -z "$PKG_NAMES" ]] && { warn "No packages to create. Exiting."; exit 0; }
-
-# --- 2) Get list of packages on destination ---
-step "Fetching destination packages..."
+# --- 2) Get destination packages ---
+step "Fetching existing destination packages..."
 DST_PKG_JSON=$(whm_api_token "$DST_HOST" "$DST_USER" "$DST_TOKEN" "listpkgs" "")
-DST_PKG_NAMES=$(echo "$DST_PKG_JSON" | jq -r '.data.pkg[]?.name // empty' | sed '/^$/d' || true)
-ok "Destination has $(echo "$DST_PKG_NAMES" | wc -l) package(s)."
+DST_PKG_NAMES=$(echo "$DST_PKG_JSON" | jq -r '.data.pkg[]?.name // empty')
+ok "Destination already has $(echo "$DST_PKG_NAMES" | wc -l) package(s)."
 
-# --- 3) Process each package ---
-for pkg in $(echo "$PKG_NAMES"); do
+# --- 3) Loop through source packages ---
+for pkg in $PKG_NAMES; do
   echo
-  step "Processing package: ${pkg}"
+  step "Processing package: $pkg"
 
   if echo "$DST_PKG_NAMES" | grep -Fxq "$pkg"; then
-    ok "Package '$pkg' already exists. Skipping."
+    ok "Package '$pkg' already exists on destination. Skipping."
     continue
   fi
 
-  step "Fetching package details (getpkginfo)..."
-  PKGINFO_JSON=$(whm_api_token "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "getpkginfo" "pkg=$(printf '%s' "$pkg" | jq -s -R -r @uri)")
+  step "Fetching details for '$pkg'..."
+  PKGINFO_JSON=$(whm_api_token "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "getpkginfo" "pkg=$(jq -s -R -r @uri <<<"$pkg")" || true)
   RESULT_OK=$(echo "$PKGINFO_JSON" | jq -r '.metadata.result // "0"')
 
   if [[ "$RESULT_OK" != "1" ]]; then
-    warn "Failed to fetch details for '$pkg'. Using fallback values (30 for all)."
-    quota=30; bandwidth=30; maxftp=30; maxsql=30; maxpop=30
-    maxlst=30; maxpark=30; maxaddon=30; maxsub=30
+    warn "Could not get details for '$pkg'. Using fallback (30 values)."
+    quota=30; bandwidth=30; maxftp=30; maxsql=30; maxpop=30; maxlst=30; maxpark=30; maxaddon=30; maxsub=30
     hasshell=0; featurelist=default; language=""; cpmod=""; ip="n"
   else
     quota=$(echo "$PKGINFO_JSON" | jq -r '.data.pkg.quota // "30"')
@@ -126,25 +137,24 @@ for pkg in $(echo "$PKG_NAMES"); do
     ip=$(echo "$PKGINFO_JSON" | jq -r '.data.pkg.ip // "n"')
   fi
 
-  echo -e "${CYAN}Creating package with values:${RESET}"
-  echo " quota=$quota, bandwidth=$bandwidth, maxftp=$maxftp, maxsql=$maxsql, maxpop=$maxpop, maxlst=$maxlst, maxpark=$maxpark, maxaddon=$maxaddon, maxsub=$maxsub"
+  echo -e "${CYAN}→ Creating with:${RESET} quota=$quota, bw=$bandwidth, ftp=$maxftp, sql=$maxsql"
 
-  step "Creating package '$pkg' on destination..."
-  urlenc() { jq -s -R -r @uri <<<"$1"; }
-  ADDPKG_PARAMS="name=$(urlenc "$pkg")&quota=$quota&bandwidth=$bandwidth&maxftp=$maxftp&maxsql=$maxsql&maxpop=$maxpop&maxlst=$maxlst&maxpark=$maxpark&maxaddon=$maxaddon&maxsub=$maxsub&hasshell=$hasshell&featurelist=$featurelist&ip=$ip"
-  [[ -n "$language" ]] && ADDPKG_PARAMS+="&language=$(urlenc "$language")"
-  [[ -n "$cpmod" ]] && ADDPKG_PARAMS+="&cpmod=$(urlenc "$cpmod")"
+  step "Creating package on destination..."
+  ADDPKG_PARAMS="name=$(jq -s -R -r @uri <<<"$pkg")&quota=$quota&bandwidth=$bandwidth&maxftp=$maxftp&maxsql=$maxsql&maxpop=$maxpop&maxlst=$maxlst&maxpark=$maxpark&maxaddon=$maxaddon&maxsub=$maxsub&hasshell=$hasshell&featurelist=$featurelist&ip=$ip"
+  [[ -n "$language" ]] && ADDPKG_PARAMS+="&language=$(jq -s -R -r @uri <<<"$language")"
+  [[ -n "$cpmod" ]] && ADDPKG_PARAMS+="&cpmod=$(jq -s -R -r @uri <<<"$cpmod")"
 
-  ADDPKG_RESP=$(whm_api_token "$DST_HOST" "$DST_USER" "$DST_TOKEN" "addpkg" "$ADDPKG_PARAMS")
-  SUCCESS=$(echo "$ADDPKG_RESP" | jq -r '.metadata.result // 0')
+  ADDPKG_RESP=$(whm_api_token "$DST_HOST" "$DST_USER" "$DST_TOKEN" "addpkg" "$ADDPKG_PARAMS" || true)
+  SUCCESS=$(echo "$ADDPKG_RESP" | jq -r '.metadata.result // "0"')
 
   if [[ "$SUCCESS" == "1" ]]; then
-    ok "Package '$pkg' created successfully."
+    ok "Created package '$pkg' on destination."
   else
     REASON=$(echo "$ADDPKG_RESP" | jq -r '.metadata.reason // "unknown"')
-    warn "Failed to create '$pkg'. Reason: $REASON"
+    err "Failed to create '$pkg'. Reason: $REASON"
+    echo "$ADDPKG_RESP" | jq .
   fi
 done
 
 echo
-ok "All done. Review above output for status."
+ok "Sync complete."
