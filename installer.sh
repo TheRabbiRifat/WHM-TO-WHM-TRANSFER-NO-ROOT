@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# installer.sh
-# Fetch packages from source WHM and create missing packages on destination WHM
+# WHM Packages & cPanel Account Sync
 # Auth: WHM API Token (Authorization: whm user:token)
-#
-# Usage:
-# sudo bash -c "$(curl -fsSL <RAW_URL> || wget -qO- <RAW_URL>)"
-#
+# Usage: sudo bash -c "$(curl -fsSL <RAW_URL> || wget -qO- <RAW_URL>)"
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -13,74 +9,56 @@ IFS=$'\n\t'
 GREEN="\e[32m"; CYAN="\e[36m"; YELLOW="\e[33m"; RED="\e[31m"; RESET="\e[0m"
 
 echo -e "${CYAN}==============================================${RESET}"
-echo -e "${CYAN} WHM Packages Sync — Fetch from source & create on destination ${RESET}"
+echo -e "${CYAN} WHM Packages & Accounts Sync Script ${RESET}"
 echo -e "${CYAN}==============================================${RESET}"
 echo
 
 # Ensure jq exists
 if ! command -v jq &>/dev/null; then
-  echo -e "${YELLOW}[*] 'jq' not found. Attempting to install...${RESET}"
-  if command -v yum &>/dev/null; then
-    sudo yum install -y jq
-  elif command -v apt &>/dev/null; then
-    sudo apt update && sudo apt install -y jq
-  else
-    echo -e "${RED}[!] Could not install jq automatically. Please install jq and re-run.${RESET}"
-    exit 1
-  fi
+  echo -e "${YELLOW}[*] Installing jq...${RESET}"
+  if command -v yum &>/dev/null; then sudo yum install -y jq
+  elif command -v apt &>/dev/null; then sudo apt update && sudo apt install -y jq
+  else echo -e "${RED}[!] Cannot install jq automatically.${RESET}"; exit 1; fi
 fi
 
-# --- Prompt for credentials ---
-read -p "Source WHM hostname (no https://, e.g. whm.example.com): " SRC_HOST
-read -p "Source WHM username (root or reseller): " SRC_USER
+# --- Credentials ---
+read -p "Source WHM host (no https://): " SRC_HOST
+read -p "Source WHM username: " SRC_USER
 read -sp "Source WHM API token: " SRC_TOKEN
 echo
-echo
-
-read -p "Destination WHM hostname (no https://): " DST_HOST
-read -p "Destination WHM username (root or reseller): " DST_USER
+read -p "Destination WHM host (no https://): " DST_HOST
+read -p "Destination WHM username: " DST_USER
 read -sp "Destination WHM API token: " DST_TOKEN
 echo
-echo
+
+read -p "Dry-run mode? (y/N): " DRYRUN
+DRYRUN=${DRYRUN,,}
 
 # Helpers
 step() { echo -e "${CYAN}[STEP]${RESET} $*"; }
-ok()   { echo -e "${GREEN}[OK]${RESET} $*"; }
+ok() { echo -e "${GREEN}[OK]${RESET} $*"; }
 warn() { echo -e "${YELLOW}[WARN]${RESET} $*"; }
-err()  { echo -e "${RED}[ERR]${RESET} $*"; }
+err() { echo -e "${RED}[ERR]${RESET} $*"; }
 
-# Wrapper for WHM API call with error handling
-whm_api_token() {
-  local host="$1" user="$2" token="$3" endpoint="$4" params="$5"
+whm_api() {
+  local host="$1"; local user="$2"; local token="$3"; local endpoint="$4"; local params="$5"
   [[ -z "$params" ]] && params="api.version=1" || params="${params}&api.version=1"
-
   local resp
-  if ! resp=$(curl -s -k -H "Authorization: whm ${user}:${token}" \
-    "https://${host}:2087/json-api/${endpoint}?${params}" 2>/dev/null); then
-    err "Unable to connect to WHM API at ${host}"
+  if ! resp=$(curl -s -k -H "Authorization: whm ${user}:${token}" "https://${host}:2087/json-api/${endpoint}?${params}" 2>/dev/null); then
+    err "Cannot connect to WHM API at $host"
     exit 1
   fi
-
-  # Check metadata for errors
-  local result reason
-  result=$(echo "$resp" | jq -r '.metadata.result // empty')
-  reason=$(echo "$resp" | jq -r '.metadata.reason // empty')
-  if [[ "$result" == "0" || "$result" == "null" ]]; then
-    err "API call '${endpoint}' failed: ${reason:-Unknown error}"
-    exit 1
-  fi
-
   echo "$resp"
 }
 
-# --- 1) Query source WHM packages ---
-step "Querying source WHM for packages..."
-PKG_JSON=$(whm_api_token "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listpkgs" "")
+# --- 1) Fetch source packages ---
+step "Fetching packages from source..."
+PKG_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listpkgs" "")
 PKG_NAMES=$(echo "$PKG_JSON" | jq -r '.data.pkg[]?.name // empty' | sed '/^$/d' || true)
 
-if [[ -z "$PKG_NAMES" ]]; then
-  warn "No packages returned by listpkgs. Trying listaccts..."
-  ACC_JSON=$(whm_api_token "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listaccts" "")
+[[ -z "$PKG_NAMES" ]] && {
+  warn "No packages found via listpkgs, trying listaccts..."
+  ACC_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listaccts" "")
   PKG_NAMES=$(echo "$ACC_JSON" | jq -r '
     if .data.acct != null then
       .data.acct[] | (.plan // .pkg // .plan_name // empty)
@@ -88,36 +66,31 @@ if [[ -z "$PKG_NAMES" ]]; then
       .data.accts[] | (.plan // .pkg // .plan_name // empty)
     else empty end
   ' | sort -u | sed '/^$/d')
-fi
+}
 
-echo
-echo -e "${CYAN}=== Packages discovered on source (${SRC_HOST}) ===${RESET}"
+echo -e "${CYAN}Source Packages:${RESET}"
 [[ -z "$PKG_NAMES" ]] && echo -e "${YELLOW} (none found)${RESET}" || echo "$PKG_NAMES" | sed 's/^/ - /'
-[[ -z "$PKG_NAMES" ]] && { warn "Nothing to do."; exit 0; }
-echo
+[[ -z "$PKG_NAMES" ]] && { warn "No packages to create."; exit 0; }
 
-# --- 2) Get destination packages ---
-step "Fetching existing destination packages..."
-DST_PKG_JSON=$(whm_api_token "$DST_HOST" "$DST_USER" "$DST_TOKEN" "listpkgs" "")
+# --- 2) Fetch destination packages ---
+step "Fetching destination packages..."
+DST_PKG_JSON=$(whm_api "$DST_HOST" "$DST_USER" "$DST_TOKEN" "listpkgs" "")
 DST_PKG_NAMES=$(echo "$DST_PKG_JSON" | jq -r '.data.pkg[]?.name // empty')
-ok "Destination already has $(echo "$DST_PKG_NAMES" | wc -l) package(s)."
 
-# --- 3) Loop through source packages ---
+# --- 3) Create missing packages ---
 for pkg in $PKG_NAMES; do
-  echo
-  step "Processing package: $pkg"
-
+  step "Processing package $pkg"
   if echo "$DST_PKG_NAMES" | grep -Fxq "$pkg"; then
-    ok "Package '$pkg' already exists on destination. Skipping."
+    ok "Package '$pkg' exists on destination, skipping."
     continue
   fi
 
-  step "Fetching details for '$pkg'..."
-  PKGINFO_JSON=$(whm_api_token "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "getpkginfo" "pkg=$(jq -s -R -r @uri <<<"$pkg")" || true)
+  # fetch config
+  PKGINFO_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "getpkginfo" "pkg=$(jq -s -R -r @uri <<<"$pkg")" || true)
   RESULT_OK=$(echo "$PKGINFO_JSON" | jq -r '.metadata.result // "0"')
 
   if [[ "$RESULT_OK" != "1" ]]; then
-    warn "Could not get details for '$pkg'. Using fallback (30 values)."
+    warn "Cannot get details for $pkg, using fallback 30 values."
     quota=30; bandwidth=30; maxftp=30; maxsql=30; maxpop=30; maxlst=30; maxpark=30; maxaddon=30; maxsub=30
     hasshell=0; featurelist=default; language=""; cpmod=""; ip="n"
   else
@@ -137,24 +110,53 @@ for pkg in $PKG_NAMES; do
     ip=$(echo "$PKGINFO_JSON" | jq -r '.data.pkg.ip // "n"')
   fi
 
-  echo -e "${CYAN}→ Creating with:${RESET} quota=$quota, bw=$bandwidth, ftp=$maxftp, sql=$maxsql"
+  echo -e "${CYAN}Package to create:$RESET $pkg (quota=$quota, bandwidth=$bandwidth)"
+  if [[ "$DRYRUN" == "y" ]]; then
+    warn "[DRY-RUN] Would create package $pkg"
+    continue
+  fi
 
-  step "Creating package on destination..."
+  # Build addpkg params
   ADDPKG_PARAMS="name=$(jq -s -R -r @uri <<<"$pkg")&quota=$quota&bandwidth=$bandwidth&maxftp=$maxftp&maxsql=$maxsql&maxpop=$maxpop&maxlst=$maxlst&maxpark=$maxpark&maxaddon=$maxaddon&maxsub=$maxsub&hasshell=$hasshell&featurelist=$featurelist&ip=$ip"
   [[ -n "$language" ]] && ADDPKG_PARAMS+="&language=$(jq -s -R -r @uri <<<"$language")"
   [[ -n "$cpmod" ]] && ADDPKG_PARAMS+="&cpmod=$(jq -s -R -r @uri <<<"$cpmod")"
 
-  ADDPKG_RESP=$(whm_api_token "$DST_HOST" "$DST_USER" "$DST_TOKEN" "addpkg" "$ADDPKG_PARAMS" || true)
+  ADDPKG_RESP=$(whm_api "$DST_HOST" "$DST_USER" "$DST_TOKEN" "addpkg" "$ADDPKG_PARAMS" || true)
   SUCCESS=$(echo "$ADDPKG_RESP" | jq -r '.metadata.result // "0"')
+  [[ "$SUCCESS" == "1" ]] && ok "Package $pkg created." || warn "Failed to create package $pkg."
+done
 
-  if [[ "$SUCCESS" == "1" ]]; then
-    ok "Created package '$pkg' on destination."
-  else
-    REASON=$(echo "$ADDPKG_RESP" | jq -r '.metadata.reason // "unknown"')
-    err "Failed to create '$pkg'. Reason: $REASON"
-    echo "$ADDPKG_RESP" | jq .
+# --- 4) Fetch source cPanel accounts ---
+step "Fetching source accounts..."
+ACCT_JSON=$(whm_api "$SRC_HOST" "$SRC_USER" "$SRC_TOKEN" "listaccts" "")
+ACCT_USERS=$(echo "$ACCT_JSON" | jq -r '.data.acct[]?.user // .data.accts[]?.user // empty' | sed '/^$/d')
+
+echo -e "${CYAN}Accounts on source:$RESET"
+echo "$ACCT_USERS" | sed 's/^/ - /'
+
+# --- 5) Create missing accounts ---
+for user in $ACCT_USERS; do
+  step "Processing account $user"
+
+  # fetch package assigned to account
+  pkg=$(echo "$ACCT_JSON" | jq -r --arg u "$user" '.data.acct[]? | select(.user==$u) | .plan // empty')
+  [[ -z "$pkg" ]] && pkg="default"
+
+  # generate dummy password
+  PASS=$(openssl rand -base64 12)
+
+  if [[ "$DRYRUN" == "y" ]]; then
+    warn "[DRY-RUN] Would create cPanel account $user with package $pkg and dummy password $PASS"
+    continue
   fi
+
+  step "Creating cPanel account $user on destination..."
+  ADDACCT_PARAMS="username=$(jq -s -R -r @uri <<<"$user")&domain=$(jq -s -R -r @uri <<<"$user").example.com&password=$(jq -s -R -r @uri <<<"$PASS")&plan=$(jq -s -R -r @uri <<<"$pkg")&contactemail=$(jq -s -R -r @uri <<<"$user")@example.com"
+
+  ADDACCT_RESP=$(whm_api "$DST_HOST" "$DST_USER" "$DST_TOKEN" "createacct" "$ADDACCT_PARAMS" || true)
+  SUCCESS=$(echo "$ADDACCT_RESP" | jq -r '.metadata.result // "0"')
+  [[ "$SUCCESS" == "1" ]] && ok "Account $user created." || warn "Failed to create account $user."
 done
 
 echo
-ok "Sync complete."
+ok "All done! Dry-run=${DRYRUN:-N}"
